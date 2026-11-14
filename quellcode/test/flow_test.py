@@ -1,0 +1,67 @@
+import asyncio
+from playwright.async_api import async_playwright
+URL='http://localhost:8765/index.html'; errs=[]; res=[]
+def chk(name, got, exp):
+    ok = got.replace('\xa0',' ').strip()==exp; res.append(ok); print(('ok   ' if ok else 'FAIL ')+name+': '+got.replace('\xa0',' ')+('' if ok else '   (erwartet '+exp+')'))
+async def main():
+    async with async_playwright() as p:
+        b=await p.chromium.launch(channel='chrome', headless=True)
+        ctx=await b.new_context(viewport={'width':390,'height':844}, locale='de-AT', has_touch=True)
+        pg=await ctx.new_page(); pg.on('pageerror', lambda e: errs.append(str(e))); pg.on('console', lambda m: errs.append(m.text) if m.type=='error' else None)
+        hero=lambda: pg.inner_text('.hero .big')
+        async def go(t): await pg.evaluate(f"location.hash='{t}'"); await pg.wait_for_timeout(120)
+        async def save(): await pg.click('[data-a="form-ok"]'); await pg.wait_for_selector('.sheet', state='detached')
+        await pg.goto(URL); await pg.fill('#w-a','1.500'); await pg.fill('#w-s','3000'); await pg.click('[data-a="welcome-go"]'); await pg.wait_for_selector('.hero')
+        chk('Start mitten im Monat: Gehalt vom 1. steckt im Startguthaben', await hero(), '1.500,00 €')
+        await go('fixkosten')
+        for name,amt,day in [('Miete','800','5'),('Handy','25','15')]:
+            await pg.click('[data-a="rec-new"][data-kind="fix"]'); await pg.fill('#f-name',name); await pg.fill('#f-a',amt); await pg.fill('#f-day',day); await save()
+        await go('uebersicht'); chk('Miete (5.) zählt nicht, Handy (15.) zählt', await hero(), '1.475,00 €')
+        await pg.click('.msw [data-d="1"]'); chk('Dezember nach Plan: 1.475 + 3.000 − 825', await hero(), '3.650,00 €')
+        await go('fixkosten'); await pg.click('.row .tx:has-text("Miete")'); await pg.fill('#f-a','850'); await pg.fill('#f-from','2027-01'); await save()
+        await go('uebersicht'); chk('Mieterhöhung ab Jänner lässt Dezember unverändert', await hero(), '3.650,00 €')
+        await pg.click('.msw [data-d="1"]'); chk('Jänner mit 850 € Miete: 3.650 + 3.000 − 875', await hero(), '5.775,00 €')
+        await go('fixkosten'); chk('Verlauf zeigt 2 Stände', str(await pg.locator('.row:has-text("Miete") .tx span').inner_text()).split(' · ')[-1], '2 Stände')
+        await pg.click('.msw [data-d="0"]')
+        await go('sparen'); await pg.click('button.btn.wide[data-a="pot"]'); await pg.fill('#f-name','Urlaub'); await pg.fill('#f-target','2000'); await pg.fill('#f-a','200'); await pg.fill('#f-opening','800'); await save()
+        chk('Sparbereich: 800 Start + 200 Zuweisung', await pg.inner_text('.hero .big'), '1.000,00 €')
+        await go('uebersicht'); chk('Sparrate reserviert: 1.475 − 200', await hero(), '1.275,00 €')
+        await pg.click('.fab'); await pg.fill('#f-a','60'); await pg.click('.chip:has-text("Beauty")'); await pg.select_option('#f-pot', index=1); await save()
+        chk('Ausgabe aus Sparbereich lässt freies Geld gleich', await hero(), '1.275,00 €')
+        await go('sparen'); chk('Sparbereich sinkt auf 940', await pg.inner_text('.hero .big'), '940,00 €')
+        await pg.click('[data-a="move"][data-to="free"]'); await pg.fill('#f-a','50'); await save()
+        await go('uebersicht'); chk('Entnahme 50 € erhöht freies Geld', await hero(), '1.325,00 €')
+        await go('budgets'); await pg.click('.prog:has-text("Lebensmittel")'); await pg.fill('#f-b','100'); await save()
+        await go('uebersicht'); await pg.click('.fab'); await pg.fill('#f-a','85'); await pg.click('.chip:has-text("Lebensmittel")'); await save()
+        chk('Budget-Warnung bei 85 %', (await pg.inner_text('.alert.warn b')), 'Lebensmittel: Budget zu 85 % ausgeschöpft')
+        chk('Freies Geld nach 85 € Einkauf', await hero(), '1.240,00 €')
+        await pg.click('.fab'); await pg.click('.seg button:has-text("Einnahme")'); await pg.fill('#f-a','100'); await pg.click('.chip:has-text("Geschenk")'); await save()
+        chk('Geschenk 100 € zählt als Einnahme', await hero(), '1.340,00 €')
+        await pg.click('.fab'); await pg.click('.seg button:has-text("Einnahme")'); await pg.fill('#f-a','20'); await pg.click('.chip:has-text("Rückzahlung")'); await pg.select_option('#f-rcat', label='Lebensmittel'); await save()
+        chk('Rückzahlung 20 € erhöht freies Geld', await hero(), '1.360,00 €')
+        chk('… und senkt die Kategorie auf 65 €: keine Warnung mehr', str(await pg.locator('.alert.warn').count()), '0')
+        await pg.click('.row[data-a="tx"]:has-text("Geschenk")'); await pg.click('[data-a="form-del"]'); await pg.wait_for_timeout(150)
+        chk('Löschen', await hero(), '1.260,00 €'); await pg.click('.toast button'); await pg.wait_for_timeout(150); chk('Rückgängig', await hero(), '1.360,00 €')
+        await go('sparen'); await pg.click('[data-a="alloc"]'); await pg.fill('.sheet input[id^="f-p_"]','120'); await save()
+        await go('uebersicht'); chk('Sparrate nur in diesem Monat 120 statt 200', await hero(), '1.440,00 €')
+        await pg.click('.msw [data-d="1"]'); chk('Dezember wieder nach Plan (200): 1.440 + 3.000 − 825 − 200', await hero(), '3.415,00 €'); await pg.click('.msw [data-d="0"]')
+        await go('einstellungen'); await pg.click('[data-a="backup-text"]'); txt=await pg.input_value('#bk-t'); await pg.click('[data-a="close"]'); await pg.wait_for_timeout(200)
+        open('/tmp/sicherung.json','w',encoding='utf-8').write(txt)
+        await pg.click('[data-a="wipe"]'); await pg.click('[data-a="confirm-ok"]'); await pg.wait_for_selector('.welcome')
+        await pg.reload(); await pg.wait_for_selector('.welcome'); print('ok   Nach „Alles löschen“ und Neuladen: Startbildschirm')
+        await pg.set_input_files('#imp','/tmp/sicherung.json'); await pg.wait_for_selector('.sheet'); await pg.click('[data-a="confirm-ok"]'); await pg.wait_for_selector('.hero')
+        chk('Sicherung eingespielt: gleicher Stand', await hero(), '1.440,00 €')
+        await pg.reload(); await pg.wait_for_selector('.hero'); chk('Nach Neuladen gespeichert', await hero(), '1.440,00 €')
+        await go('auswertung'); rep=await pg.inner_text('.tbl'); print('ok   Monatsbericht geladen' if 'Einnahmen gesamt' in rep else 'FAIL Bericht'); 
+        await pg.screenshot(path='shots/10-report-real.png')
+        # Zurück-Taste schließt das Blatt
+        await go('uebersicht'); await pg.click('.fab'); await pg.wait_for_selector('.sheet'); await pg.go_back(); await pg.wait_for_timeout(200)
+        chk('Zurück-Taste schließt die Eingabe', str(await pg.locator('.sheet').count())+' '+(await pg.evaluate('location.hash')), '0 #uebersicht')
+        # Offline nach Service-Worker-Installation
+        await pg.wait_for_function("navigator.serviceWorker.ready.then(()=>true)"); await pg.wait_for_timeout(600); await ctx.set_offline(True); await pg.reload(); 
+        try:
+            await pg.wait_for_selector('.hero', timeout=5000); chk('Ohne Internet startet die App', await hero(), '1.440,00 €')
+        except Exception as e: print('FAIL offline', str(e)[:80]); res.append(False)
+        await b.close()
+    print('Fehler in der Konsole:', errs); print(sum(res), 'von', len(res), 'Prüfungen bestanden')
+asyncio.run(main())
